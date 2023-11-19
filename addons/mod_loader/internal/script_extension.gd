@@ -7,7 +7,9 @@ extends Reference
 
 const LOG_NAME := "ModLoader:ScriptExtension"
 
-# Sort script extensions by inheritance and apply them in order
+const cached_parent_scripts := {}
+
+# Sort script extensions by inheritance and load order and apply them in order
 static func handle_script_extensions() -> void:
 	var extension_paths := []
 	for extension_path in ModLoaderStore.script_extensions:
@@ -16,58 +18,13 @@ static func handle_script_extensions() -> void:
 		else:
 			ModLoaderLog.error("The child script path '%s' does not exist" % [extension_path], LOG_NAME)
 			
-	# Sort by inheritance
-	extension_paths.sort_custom(InheritanceSorting.new(), "_check_inheritances")
+	# Sort by inheritance and load order
+	extension_paths = _sort_extension_paths(extension_paths)
 	
 	# Load and install all extensions
 	for extension in extension_paths:
 		var script: Script = apply_extension(extension)
 		_reload_vanilla_child_classes_for(script)
-
-
-# Sorts script paths by their ancestors.  Scripts are organized by their common
-# acnestors then sorted such that scripts extending script A will be before
-# a script extending script B if A is an ancestor of B.
-class InheritanceSorting:
-	var stack_cache := {}
-
-	# Comparator function.  return true if a should go before b.  This may
-	# enforce conditions beyond the stated inheritance relationship.
-	func _check_inheritances(extension_a: String, extension_b: String) -> bool:
-		var a_stack := cached_inheritances_stack(extension_a)
-		var b_stack := cached_inheritances_stack(extension_b)
-
-		var last_index: int
-		for index in a_stack.size():
-			if index >= b_stack.size():
-				return false
-			if a_stack[index] != b_stack[index]:
-				return a_stack[index] < b_stack[index]
-			last_index = index
-
-		if last_index < b_stack.size():
-			return true
-
-		return extension_a < extension_b
-	
-	# Returns a list of scripts representing all the ancestors of the extension
-	# script with the most recent ancestor last.
-	#
-	# Results are stored in a cache keyed by extension path
-	func cached_inheritances_stack(extension_path: String) -> Array:
-		if stack_cache.has(extension_path):
-			return stack_cache[extension_path]
-			
-		var stack := []
-		
-		var parent_script: Script = load(extension_path)
-		while parent_script:
-			stack.push_front(parent_script.resource_path)
-			parent_script = parent_script.get_base_script()
-		stack.pop_back()
-		
-		stack_cache[extension_path] = stack
-		return stack
 
 
 static func apply_extension(extension_path: String) -> Script:
@@ -109,6 +66,85 @@ static func apply_extension(extension_path: String) -> Script:
 	child_script.take_over_path(parent_script_path)
 
 	return child_script
+
+
+static func _sort_extension_paths(unsorted_extensions:Array)->Array:
+	var sorted_by_load_order = _sort_extensions_by_load_order(unsorted_extensions)
+	var inheritance_order = _get_vanilla_inheritance_order(sorted_by_load_order)
+	var sorted_by_both = _sort_extensions_with_load_order_and_inheritance(sorted_by_load_order, inheritance_order)
+	
+	return sorted_by_both
+
+
+# Sorts all given extensions following only the current load order
+static func _sort_extensions_by_load_order(extensions:Array)->Array:
+	var extensions_sorted: = []
+	
+	for _mod_data in ModLoaderStore.mod_load_order:
+		for script in extensions:
+			var mod_id = script.trim_prefix(_ModLoaderPath.get_unpacked_mods_dir_path()).get_slice("/", 0)
+			if mod_id == _mod_data.dir_name:
+				extensions_sorted.push_back(script)
+	
+	return extensions_sorted
+
+
+# Takes in an array of extension paths, and returns an array of the vanilla paths
+# sorted in the order they should be extended (going down the inheritance tree)
+static func _get_vanilla_inheritance_order(extensions:Array)->Array:
+	var sorted := []
+	var extensions_paths := []
+	
+	for script_extension in extensions:
+		var parent_script_path = load(script_extension).get_base_script().resource_path
+		cached_parent_scripts[script_extension] = parent_script_path
+		if not parent_script_path in extensions_paths:
+			extensions_paths.push_back(parent_script_path)
+	
+	for path in extensions_paths:
+		var path_tree := []
+		var parent_script:Script = load(path)
+		
+		while parent_script:
+			if not parent_script.resource_path in path_tree:
+				path_tree.push_back(parent_script.resource_path)
+			parent_script = parent_script.get_base_script()
+		
+		var insert_from = -1
+		for i in path_tree.size():
+			if path_tree[i] in sorted:
+				insert_from = i
+				break
+		
+		if insert_from == -1:
+			sorted.append_array(path_tree)
+		else:
+			var target_position = sorted.find(path_tree[insert_from])
+			for i in insert_from:
+				sorted.insert(target_position, path_tree[insert_from - i - 1])
+				pass
+	
+	var to_remove := []
+	for path in sorted:
+		if not path in extensions_paths:
+			to_remove.push_back(path)
+	for path in to_remove:
+		sorted.erase(path)
+	
+	sorted.invert()
+	return sorted
+
+# Iterates over the descending vanilla inheritance tree order for the to-be-extended scripts
+# For each vanilla path sort the relevant extensions following the load order
+static func _sort_extensions_with_load_order_and_inheritance(load_order_sorted_extension:Array, inheritance_order:Array)->Array:
+	var sorted := []
+	for path in inheritance_order:
+		for extension in load_order_sorted_extension:
+			if cached_parent_scripts[extension] == path:
+				sorted.push_back(extension)
+	
+	return sorted
+
 
 # Reload all children classes of the vanilla class we just extended
 # Calling reload() the children of an extended class seems to allow them to be extended
