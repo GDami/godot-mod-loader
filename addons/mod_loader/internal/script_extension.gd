@@ -82,7 +82,7 @@ class InheritanceSorting:
 				return false
 		
 		# Should never happen
-		return true
+		return extension_a < extension_b
 
 
 static func apply_extension(extension_path: String) -> Script:
